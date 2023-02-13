@@ -4,7 +4,8 @@ Requirements
     2. Windows machine when using the above function, or an alteration to a linux compatible one if you're
        running it on a raspberry pi
     3. A Reddit account with an app registration
-
+Version: 0.1.7
+    Added video to downloads, may not work as expected (or be effective at all) since the file needs a 100% match.
 Version: 0.1.6
     Added an output to a html file for easier invesigation of reposts
     Using folder name as base for subreddit/save location
@@ -47,11 +48,11 @@ Performance?
 ###>
 
 # Global variables:
-$username = ""                                                      # Your Reddit username
-$password = ""                                                      # Your Reddit password
-$ClientId = ""                                                      # Your Reddit app's client id
-$clientsecret = ""                                                  # Your Reddit app's clientsecret
-$useragent = "$username's Repost-hasher 0.1.6"                      # Useragent, update version
+$username = ""                                                      # Your Reddit username, or define with a secure vault
+$password = ""                                                      # Your Reddit password, or define with a secure vault
+$ClientId = ""                                                      # Your Reddit app's client id, or define with a secure vault
+$clientsecret = ""                                                  # Your Reddit app's clientsecret, or define with a secure vault
+$useragent = "$username's Repost-hasher 0.1.7"                      # Useragent, update version
 $subname = $PSScriptRoot | Split-Path -Leaf                         # General subname based on folder name
 $apiurl = "https://oauth.reddit.com"                                # API url 
 $storage =  $PSScriptRoot                                           # Storage per subreddit
@@ -307,9 +308,15 @@ Function Invoke-Redditreport {
 
 ## End functions
 
-# Get users to hash images of
-#$users = get-content $storage\users.txt
-$iwr = Invoke-WebRequest -uri $oauthsubreddit/new?limit=5 -Headers $headers -UserAgent $useragent
+# Start main script
+
+# Splat the frequently used vars to shorten commands
+$iwrsplat = @{
+    Headers = $headers
+    Useragent = $useragent
+}
+
+$iwr = Invoke-WebRequest -uri $oauthsubreddit/new?limit=5 @iwrsplat
 $posts = $iwr.Content | ConvertFrom-Json
 
 # Check rate limit status
@@ -324,20 +331,47 @@ $posts = $posts.data.children.data
 write-host (get-date) 'Downloaded' $posts.Count 'posts, checking for unknown posts'
 
 # Filter out users not in repost-checklist
-#$posts = $posts | where {$_.author -in $users}
+## End functions
 
-# Loop through posts and download images
+# Start main script
+
+# Splat the frequently used vars to shorten commands
+$iwrsplat = @{
+    Headers = $headers
+    Useragent = $useragent
+}
+
+$iwr = Invoke-WebRequest -uri $oauthsubreddit/new?limit=5 @iwrsplat
+$posts = $iwr.Content | ConvertFrom-Json
+
+# Check rate limit status
+Write-Host (get-date) "Remaining rate limit: $($iwr.Headers.'x-ratelimit-remaining')"
+if ($iwr.Headers.'x-ratelimit-remaining'.split('.')[0] -lt 10) { start-sleep -Seconds [int]$iwr.Headers.'x-ratelimit-reset'[0]}
+
+
+# Extract interesting bits
+$posts = $posts.data.children.data
+
+# Log downloaded posts
+write-host (get-date) 'Downloaded' $posts.Count 'posts, checking for unknown posts'
+
+# Loop through posts and download images/videos
 foreach ($post in $posts){
     if ($post.name -notin (Get-Content $storage\hashedposts.txt)){
+        # New post double beep
+        [console]::beep(500,300);[console]::beep(500,300)
+         
+        $filetypes = '.jpg', '.bmp', '.png', '.gif', 'jpeg', 'webp'
+
         # Download source image (assuming non-gallery type post)
-        if ($post.url -match '.jpg' -or $post.url -match '.png' -or $post.url -match '.gif'){
-            
+        if ($post.url.Substring($post.url.length-4) -in $filetypes){
+
             # Log output unknown post
             Write-host (get-date) 'Found a new post, downloading image'
             
             # Download image to generic filename
             try{
-                Invoke-WebRequest -Uri $post.url -OutFile $storage\filehash.jpg -ErrorVariable downloaderror
+                Invoke-WebRequest -Uri $post.url -OutFile $storage\filehash.jpg -ErrorVariable downloaderror -ErrorAction SilentlyContinue
             }
             catch{Write-Host (get-date 'Error downloading post, dumping json for debug' $post) }
 
@@ -352,6 +386,10 @@ foreach ($post in $posts){
             # Check the hash against known list of hashes
             invoke-hashmatch $hash
             
+            # Remove temporary files
+            remove-item $storage\filehash.jpg -Force
+            remove-item $storage\filehash_resized.jpg -Force
+
             # Clear the hash variable to prevent contamination
             clear-variable hash
         } # End if image of .jpg/png/gif
@@ -368,7 +406,7 @@ foreach ($post in $posts){
                 if (($post.media_metadata | out-string) -match 'm=image/gif'){$extension = '.gif'}
                 if (($post.media_metadata | out-string) -match 'm=image/png'){$extension = '.png'}
                 if (($post.media_metadata | out-string) -match 'm=image/jpg'){$extension = '.jpg'}
-                Invoke-WebRequest -uri "https://i.redd.it/$image$extension" -OutFile $storage\filehash.jpg -ErrorVariable downloaderror
+                Invoke-WebRequest -uri "https://i.redd.it/$image$extension" -OutFile $storage\filehash.jpg -ErrorVariable downloaderror -ErrorAction SilentlyContinue
                 
                 # Check for download errors
                 if ($downloaderror) { write-host (get-date) 'Could not download image' $post.url}
@@ -384,7 +422,52 @@ foreach ($post in $posts){
                 Clear-Variable hash
             } # End foreach image in gallery
         } # End if gallery type
-        
+
+        ## Video posts
+        if ($post.is_video -eq 'true'){
+
+            $iwrparams = @{
+                Headers = @{Authorization = 'Bearer ' + $bearer}
+                Useragent = $useragent
+                Outfile =  "$storage\filehash.vid"
+                ErrorVariable = 'downloaderror'
+                ErrorAction = 'SilentlyContinue'
+            }
+            
+            # Use youtube DL to download video because dash issues
+            $json = C:\Youtube-dl\youtube-dl.exe -F $post.media.reddit_video.scrubber_media_url --write-info-json
+            $streamtype = (($json | Where-Object {$_ -match 'hls' -and $_ -notmatch 'audio'})[0] -split(" "))[0]
+            c:\youtube-dl\youtube-dl.exe -f $streamtype $post.media.reddit_video.scrubber_media_url -o $storage\filehash.vid -q
+            
+            #check download
+            if (Test-Path $storage\filehash.vid){
+                Write-host (get-date) "Succesfully downloaded video from $($post.url)"
+            }
+                
+            
+            # Check for download errors
+            if ($downloaderror) { write-host (get-date) 'Could not download file' $post.url}
+            Remove-Variable downloaderror -ErrorAction SilentlyContinue
+
+            # Get hash for the downloaded image
+            $hash = get-filehash $iwrparams.Outfile
+            
+            # Add post url and date to hash-variable for proof later on
+            $hash | Add-Member -MemberType NoteProperty  -Name post-date -Value (Get-Date)
+            $hash | Add-Member -MemberType NoteProperty  -Name post-created -Value $post.created
+            $hash | Add-Member -MemberType NoteProperty  -Name Post-ID -Value ($post.name -replace('t3_','https://www.reddit.com/comments/'))
+            $hash | Add-Member -MemberType NoteProperty -Name Author -Value ($post.author)
+
+            # Check hash against known hashes
+            invoke-hashmatch $hash
+
+            # Remove video file
+            remove-item $storage\filehash.vid
+
+            # Clear the hash variable to prevent contamination
+            Clear-Variable hash
+        } # End if video post
+
         # Add posts to hashed posts
         $post.name | Out-File $storage\hashedposts.txt -Append
         Write-host (get-date) 'Post' $post.name 'added to known posts'
@@ -399,5 +482,140 @@ Write-host (get-date) 'All done, exiting'
 $time = (Get-date) | Select-Object hour, minute
 if ($time.hour -eq 12 -and $time.minute -eq 20) { 
     Write-host (get-date) 'Cleaning up logfile'
-    Get-Content $storage\crossdressing-hashes.log -last 10000 | Out-File $storage\crossdressing-hashes.log }
+    $logcontent = Get-Content $storage\crossdressing-hashes.log -last 10000
+    $logcontent | Set-Content $storage\crossdressing-hashes.log }
 Write-host (get-date) (Stop-transcript)
+
+
+
+# Loop through posts and download images
+foreach ($post in $posts){
+    if ($post.name -notin (Get-Content $storage\hashedposts.txt)){
+        # New post double beep
+        [console]::beep(500,300);[console]::beep(500,300)
+         
+        $filetypes = '.jpg', '.bmp', '.png', '.gif', 'jpeg', 'webp'
+
+        # Download source image (assuming non-gallery type post)
+        if ($post.url.Substring($post.url.length-4) -in $filetypes){
+
+            # Log output unknown post
+            Write-host (get-date) 'Found a new post, downloading image'
+            
+            # Download image to generic filename
+            try{
+                Invoke-WebRequest -Uri $post.url -OutFile $storage\filehash.jpg -ErrorVariable downloaderror -ErrorAction SilentlyContinue
+            }
+            catch{Write-Host (get-date 'Error downloading post, dumping json for debug' $post) }
+
+            # Check for download-errors
+            if ($downloaderror) { write-host (get-date) 'Could not download image' $post.url
+            }
+            Remove-Variable downloaderror -ErrorAction SilentlyContinue
+
+            # Hash the image
+            $hash = invoke-filehash
+
+            # Check the hash against known list of hashes
+            invoke-hashmatch $hash
+            
+            # Remove temporary files
+            remove-item $storage\filehash.jpg -Force
+            remove-item $storage\filehash_resized.jpg -Force
+
+            # Clear the hash variable to prevent contamination
+            clear-variable hash
+        } # End if image of .jpg/png/gif
+
+        # For gallery type posts (only first image)
+        elseif ($post.url -match 'gallery') {
+            write-host (get-date) 'Found new gallery post, downloading images'
+            
+            # Get gallery details
+            $gallery = $post.gallery_data.items.media_id
+            
+            # Get gallery images
+            foreach ($image in $gallery){
+                if (($post.media_metadata | out-string) -match 'm=image/gif'){$extension = '.gif'}
+                if (($post.media_metadata | out-string) -match 'm=image/png'){$extension = '.png'}
+                if (($post.media_metadata | out-string) -match 'm=image/jpg'){$extension = '.jpg'}
+                Invoke-WebRequest -uri "https://i.redd.it/$image$extension" -OutFile $storage\filehash.jpg -ErrorVariable downloaderror -ErrorAction SilentlyContinue
+                
+                # Check for download errors
+                if ($downloaderror) { write-host (get-date) 'Could not download image' $post.url}
+                Remove-Variable downloaderror -ErrorAction SilentlyContinue
+
+                # Get hash for the downloaded image
+                $hash = invoke-filehash
+
+                # Check hash against known hashes
+                invoke-hashmatch $hash
+
+                # Clear the hash variable to prevent contamination
+                Clear-Variable hash
+            } # End foreach image in gallery
+        } # End if gallery type
+
+        ## Video posts
+        if ($post.is_video -eq 'true'){
+
+            $iwrparams = @{
+                Headers = @{Authorization = 'Bearer ' + $bearer}
+                Useragent = $useragent
+                Outfile =  "$storage\filehash.vid"
+                ErrorVariable = 'downloaderror'
+                ErrorAction = 'SilentlyContinue'
+            }
+            
+            # Use youtube DL to download video because dash issues
+            $json = C:\Youtube-dl\youtube-dl.exe -F $post.media.reddit_video.scrubber_media_url --write-info-json
+            $streamtype = (($json | Where-Object {$_ -match 'hls' -and $_ -notmatch 'audio'})[0] -split(" "))[0]
+            c:\youtube-dl\youtube-dl.exe -f $streamtype $post.media.reddit_video.scrubber_media_url -o $storage\filehash.vid -q
+            
+            #check download
+            if (Test-Path $storage\filehash.vid){
+                Write-host (get-date) "Succesfully downloaded video from $($post.url)"
+            }
+                
+            
+            # Check for download errors
+            if ($downloaderror) { write-host (get-date) 'Could not download file' $post.url}
+            Remove-Variable downloaderror -ErrorAction SilentlyContinue
+
+            # Get hash for the downloaded image
+            $hash = get-filehash $iwrparams.Outfile
+            
+            # Add post url and date to hash-variable for proof later on
+            $hash | Add-Member -MemberType NoteProperty  -Name post-date -Value (Get-Date)
+            $hash | Add-Member -MemberType NoteProperty  -Name post-created -Value $post.created
+            $hash | Add-Member -MemberType NoteProperty  -Name Post-ID -Value ($post.name -replace('t3_','https://www.reddit.com/comments/'))
+            $hash | Add-Member -MemberType NoteProperty -Name Author -Value ($post.author)
+
+            # Check hash against known hashes
+            invoke-hashmatch $hash
+
+            # Remove video file
+            remove-item $storage\filehash.vid
+
+            # Clear the hash variable to prevent contamination
+            Clear-Variable hash
+        } # End if video post
+
+        # Add posts to hashed posts
+        $post.name | Out-File $storage\hashedposts.txt -Append
+        Write-host (get-date) 'Post' $post.name 'added to known posts'
+    } # Einde If post notin known posts
+}
+
+
+# Log output finished
+Write-host (get-date) 'All done, exiting'
+
+# Clean up log
+$time = (Get-date) | Select-Object hour, minute
+if ($time.hour -eq 12 -and $time.minute -eq 20) { 
+    Write-host (get-date) 'Cleaning up logfile'
+    $logcontent = Get-Content $storage\crossdressing-hashes.log -last 10000
+    $logcontent | Set-Content $storage\crossdressing-hashes.log }
+Write-host (get-date) (Stop-transcript)
+
