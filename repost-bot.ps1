@@ -1,11 +1,11 @@
 <###
-Requirements
-    1. The image resize function, I got it from https://gist.github.com/someshinyobject/617bf00556bc43af87cd
-    2. Windows machine when using the above function, or an alteration to a linux compatible one if you're
-       running it on a raspberry pi
-    3. A Reddit account with an app registration
+Version: 0.2.0:
+    Added option for finding posts since last run
+Version: 0.1.8
+    Reworking script to run from a single management instance. It will check the latest post and use that
+    to find newer posts at the next run.
 Version: 0.1.7
-    Added video to downloads, may not work as expected (or be effective at all) since the file needs a 100% match.
+    Added QR code recognition, trialing effectiveness
 Version: 0.1.6
     Added an output to a html file for easier invesigation of reposts
     Using folder name as base for subreddit/save location
@@ -19,50 +19,28 @@ Version: 0.1.0
 
 This script is made to moderate /r/$subname
 
-To use this bot, use the global variables to get started. I'm not a programmer so if the code looks chunky you'll 
-know why ;)
-I expect you can run multiple instances with the same ClientID and Secret but with different subreddits, the Reddit
-rate-limiting could be a factor and is included in the code. It does not look into actions of multiple instances so it 
-could be one script is constantly waiting while others keep using the rate that's available.
-
-This script uses the root folder name as it's temporary storage for files and a checklist to see if it's already actioned
-a post previously.
-    hashedposts.txt - To keep track of posts that had been hashed
-    token.txt - Plain text saving to avoid having a token created at every run (I'm assuming Reddit doesn't like that)
-    filehashs.csv - The list of hashed images, based on a 12x12 resize of the original to account for minor variations
-    $subname-hashes.log - A Powershell transcript of the log actions, which is also why I use write-host rather than
-      write-output
-
-Known issues:
-  1. Gallery posts that are spoilered give an error
-  2. Videos are not processed
-  3. Text posts are not included
-  4. Imgur or other external images may or may not work, depending on how the image is included in the post
-  
-Performance?
-  Running the script on my laptop (Ryzen 4800H / 16GB memory) doesn't have any noticable effect on performance 
-  (even during games like MSFS at ultra resolution).
-  Running the script with a limit=100 did have some effect, but it was done in about a minute where the posts 
-  has about galleries in about 40% of the posts, going back 10-12 hours (quarter milion members subreddit).
-  I run my bot every minute which is fine with the limit=5.
+This script also uses several files in e:\temp, rename these if you're running multiple instances
+    actionedposts.txt - To keep track of posts that had a mod-not added (to prevent doubles after a reboot)
+    actionedNSFWposts.txt - To keep track of posts that had been locked as NSFW (to prevent duplicate actions after a reboot)
+    flairs.csv - A known list of flairs and the resulting action parameters (not all parameters have been implemented yet)
+    pass.txt - Your Reddit password in plain text (yes, I know this is unsafe)
 ###>
 
+param([string]$subname)
+
 # Global variables:
-$username = ""                                                      # Your Reddit username, or define with a secure vault
-$password = ""                                                      # Your Reddit password, or define with a secure vault
-$ClientId = ""                                                      # Your Reddit app's client id, or define with a secure vault
-$clientsecret = ""                                                  # Your Reddit app's clientsecret, or define with a secure vault
-$useragent = "$username's Repost-hasher 0.1.7"                      # Useragent, update version
-$subname = $PSScriptRoot | Split-Path -Leaf                         # General subname based on folder name
+$username = ""                                                      # Your Reddit username
+$useragent = "$username's Repost-hasher 0.2.0"                      # Useragent, update version
+$subname = "crossdressing"                                          # General subname based on folder name
 $apiurl = "https://oauth.reddit.com"                                # API url 
-$storage =  $PSScriptRoot                                           # Storage per subreddit
+$storage =  "E:\Temp\$subname\"                                        # Storage per subreddit
 $oauthsubreddit = "https://oauth.reddit.com/r/$subname"             # Oauth URL for subreddit specific operations
 $ProgressPreference = 'Silentlycontinue'                            # Do not show invoke-webrequest progress
 
 # Log output
 Write-host (get-date) (Start-Transcript $storage\$subname-hashes.log -Append  -UseMinimalHeader)
 
-# Functions
+# Build authorizations
 Function New-redditremovalnotice {
     param (
     [Parameter (Mandatory = $True)] [String]$postid,
@@ -99,7 +77,11 @@ Function New-redditremovalnotice {
     } # End of new reddit removal reason
 
 Function Get-reddittoken {
-   
+    # API values for authentication
+    $ClientId = ""
+    $clientsecret = ""
+    $password = ""
+    
     # Build token request
     $credential = "$($ClientId):$($clientsecret)"
     $encodedCreds = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($credential))
@@ -107,7 +89,7 @@ Function Get-reddittoken {
     $body = "grant_type=password&username=$username&password=$password"
 
     # Execute token request
-    $token = Invoke-RestMethod -body $body -Headers @{Authorization = $basicAuthValue}  -method post   -useragent "Wauske's flairbot 0.2" -uri 'https://www.reddit.com/api/v1/access_token'
+    $token = Invoke-RestMethod -body $body -Headers @{Authorization = $basicAuthValue}  -method post   -useragent $useragent -uri 'https://www.reddit.com/api/v1/access_token'
     $bearer = $token.access_token
     $geldigheidtoken = (get-date).AddSeconds(86400)
 
@@ -146,7 +128,7 @@ if ((get-date) -gt (get-date($token.geldigheidtoken))) {
 # Build headers used for authenticating API request
 $bearer = $token.Bearer
 $geldigheidtoken = $token.geldigheidtoken
-$token | Export-Csv -Path $storage\token.txt #Export-Csv $token   $storage\token.txt
+$token | Export-Csv -Path $storage\token.txt 
 $headers = @{Authorization="Bearer $bearer"}
 
 
@@ -206,19 +188,19 @@ Function Remove-redditpost {
 
 Function Invoke-redditban {
     param (
-      [Parameter (Mandatory = $True)] [String]$user,
-      [Parameter (Mandatory = $True)] [String]$container,
-      [Parameter (Mandatory = $True)] [String]$duration,
-      [Parameter (Mandatory = $True)] [String]$reason
+    [Parameter (Mandatory = $True)] [String]$user,
+    [Parameter (Mandatory = $True)] [String]$container,
+    [Parameter (Mandatory = $True)] [String]$duration,
+    [Parameter (Mandatory = $True)] [String]$reason
     )
 
     # Code block
     $body = @{
-      ban_reason=$reason
-      ban_message=$reason
-      name=$user
-      note=$reason
-      type="banned"
+        ban_reason=$reason
+        ban_message=$reason
+        name=$user
+        note=$reason
+        type="banned"
     }
     if ($duration -ne 'False') {$body += @{duration = $duration} }
 
@@ -234,23 +216,22 @@ Function invoke-filehash {
 
     # Code block
     # Resize image to 12x12 to account for minor changes
-    Resize-Image -ImagePath $storage\filehash.jpg -Height 12 -Width 12
+    if (Test-Path $storage\filehash.jpg){
+        Resize-Image -ImagePath $storage\filehash.jpg -Height 12 -Width 12
+        
+        # Hash the resized file
+        $hash = Get-FileHash $storage\filehash_resized.jpg
+    }
 
-    # Remove source image
-    remove-item $storage\filehash.jpg -Force
-
-    # Hash the resized file
-    $hash = Get-FileHash $storage\filehash_resized.jpg
-
-    # Remove resized image
-    remove-item $storage\filehash_resized.jpg -force
-    
+  
     # Add post url and date to hash-variable for proof later on
     $hash | Add-Member -MemberType NoteProperty  -Name post-date -Value (Get-Date)
+    $hash | Add-Member -MemberType NoteProperty  -Name post-created -Value $post.created
     $hash | Add-Member -MemberType NoteProperty  -Name Post-ID -Value ($post.name -replace('t3_','https://www.reddit.com/comments/'))
     $hash | Add-Member -MemberType NoteProperty -Name Author -Value ($post.author)
 
     return $hash
+
 } # End of invoke-filehash
 
 # Invoke-hashmatch
@@ -259,32 +240,100 @@ Function Invoke-hashmatch{
         [Parameter (Mandatory = $True)] $hash
     )
             
-    # Check new against known hashes
-    foreach ($knownhash in (Import-Csv $storage\filehashs.csv)){
-        if($hash.hash -eq $knownhash.hash){
-            # actie als match
-            #Remove-redditpost -Postid $post.name
-            #New-redditmodnote -postid $post.name -author $post.author -subreddit_modnote $subname -link_flair_text "Filehash confirms suspected repost, reported."
-            #Lock-redditpost -Postid $post.name
-            write-host (get-date) 'Found a repost:' $hash.'Post-ID' 'and previous post:' $knownhash.'Post-ID'
+    # Read all known hashes
+    $knownhashes = Import-Csv $storage\filehashs.csv  | Sort-Object @{expression={$_.'Post-date' -as [datetime]}}
 
-            # Postid maken zoals reddit verwacht
-            $postid = 't3_' + $hash.'Post-ID' -replace('https://www.reddit.com/comments/','')
+    # Check has existance and return line-number (or -1 if not)
+    $regelnummer = [array]::indexof($knownhashes.hash,$hash.hash)
+
+    # If linenumber not -1, execute repost report
+    if ($regelnummer -ne -1){ 
+        $knownhash = $knownhashes[$regelnummer]
+
+        # Postid maken zoals reddit verwacht
+        $postid = 't3_' + $hash.'Post-ID' -replace('https://www.reddit.com/comments/','')
+
+        # Timestamp als rekenbare variabele maken            
+        $created = [double]$knownhash.'post-created'
+
+        if ($post.created -lt $created + 600 -and $created -ne 0){
+            # Probabble duplicate post
+            $reportreason = "Repost within 10min, probably duplicate: " + $knownhash.'post-date'+' ' + $knownhash.'Post-ID'
+            write-host (get-date) 'Found a probable duplicate repost:' $hash.'Post-ID' 'and previous post:' $knownhash.'Post-ID'
+
+            #invoke-redditreport -postid $postid -Reportreason $reportreason
+            Write-host (get-date) 'Repost is less than 10 minutes after the original, skipping report.'    
+        }
+        else {
+
+            # Check previous post
+            $previousposturl = ($knownhash.'post-id' -replace("www.","oauth.")) + ".json"
+
+            # Build splat for getting previous post details
+            $previouspostsplat = @{
+                uri       = $previousposturl
+                Useragent = $useragent 
+                Headers   = $headers
+            }
+
+            # Read the data from Reddit
+            $previouspost = Invoke-RestMethod @previouspostsplat
+
+            # Extract the post details
+            $previouspost = $previouspost.data.children.data[0]
+
+            # Save for debugging purposes
+            $previouspost | ConvertTo-Json -Depth 100 | Out-File $storage\$($previouspost.name).json -Verbose
+            #$previouspost | import-csv $storage\$($previouspost.name).csv
+
+            if ($previouspost.removed -eq 'True' -and $previouspost.removed_by_category -eq 'moderator'){
+                Write-host (get-date) "Previous post removed by mod: $($knownhash.'Post-id')"
+                $reportreason = "Repost, previous post removed by mod: " + $knownhash.'post-date'+' ' + $knownhash.'Post-ID'
+            }
+            elseif($previouspost.removed -match 'False' -and $previouspost.removed_by_category -match 'deleted'){
+                Write-host (get-date) "Post removed by user: $($knownhash.'Post-id')"
+                $reportreason = "Repost, previous post removed by user: " + $knownhash.'post-date'+' ' + $knownhash.'Post-ID'
+            }
+            elseif($previouspost.removed -eq 'False' -and $previouspost.removed_by_category -eq ''){
+                Write-host (get-date) "Repost, original still online: $($knownhash.'Post-id')"
+                $reportreason = "Repost, original still online: " + $knownhash.'post-date'+' ' + $knownhash.'Post-ID'
+            }
+            elseif($previouspost.author -notmatch 'deleted' -and $previouspost.removed -match 'False'){
+                Write-host (get-date) "Original still online: $($knownhash.'Post-id')"
+                $reportreason = "Repost, original still online: " + $knownhash.'post-date'+' ' + $knownhash.'Post-ID'
+            }
+            elseif($previouspost.author -match 'deleted' -and $previouspost.removed -match 'False'){
+                Write-host (get-date) "Author deleted account: $($knownhash.'Post-id')"
+                $reportreason = "Repost, user deleted account: " + $knownhash.'post-date'+' ' + $knownhash.'Post-ID'
+            }
+            else{
+                Write-host (get-date) "Post status unknown: $($knownhash.'Post-id')"
+                $reportreason = "Repost, reason unknown: " + $knownhash.'post-date'+' ' + $knownhash.'Post-ID'
+            }
 
             # Reportreason opbouwen
-            $reportreason = "Found a repost, previous post: " + $knownhash.'Post-ID'
+            [console]::beep(500,800)
+            
+            # Log output
+            write-host (get-date) 'Found a repost:' $hash.'Post-ID' 'and previous post:' $knownhash.'Post-ID'
 
             # Report the post as a repost
             invoke-redditreport -postid $postid -Reportreason $reportreason
             Write-host (get-date) "Invoked reddit report with parameters:  $postid and reason: `"$reportreason`""
-            
-            # Update the html file presenting known reposts
-            import-csv $storage\filehashs.csv | Group-Object hash | Where-Object {$_.count -gt 1} | `
-                Select-Object -ExpandProperty Group |  Select-Object Post-date, author, hash | ConvertTo-Html > 'G:\Mijn Drive\_Temp\crossdressing\reposters.html'
-            } # Einde if hash -eq known hash
-        } # Einde foreach known hash
-        # Add hash to known hashes
-        $hash | Export-Csv $storage\filehashs.csv -Append
+        
+        }
+
+        # Update the csv file presenting known reposts
+        import-csv E:\temp\crossdressing\filehashs.csv | Group-Object hash | `
+            where-object {$_.count -gt 1} | select-object -ExpandProperty Group | `
+            Group-Object author | select-object -ExpandProperty Group | `
+            Select-Object Author, Post-Date, Post-id, Hash | `
+            Export-Csv 'G:\Mijn Drive\_Temp\crossdressing\reposters.csv' -NoTypeInformation
+        } # Einde if regelnummer niet -1
+
+    # Add hash to known hashes
+    $hash | Export-Csv $storage\filehashs.csv -Append
+
 } # End invoke-hashmatch
 
 Function Invoke-Redditreport {
@@ -304,7 +353,131 @@ Function Invoke-Redditreport {
     
     Write-Host (get-date) "Report succesful:" $result.success
     
-} # End of invoke-hashmatch
+}
+
+## Image-resize function
+<#
+.SYNOPSIS
+   Resize an image
+.DESCRIPTION
+   Resize an image based on a new given height or width or a single dimension and a maintain ratio flag. 
+   The execution of this CmdLet creates a new file named "OriginalName_resized" and maintains the original
+   file extension
+.PARAMETER Width
+   The new width of the image. Can be given alone with the MaintainRatio flag
+.PARAMETER Height
+   The new height of the image. Can be given alone with the MaintainRatio flag
+.PARAMETER ImagePath
+   The path to the image being resized
+.PARAMETER MaintainRatio
+   Maintain the ratio of the image by setting either width or height. Setting both width and height and also this parameter
+   results in an error
+.PARAMETER Percentage
+   Resize the image *to* the size given in this parameter. It's imperative to know that this does not resize by the percentage but to the percentage of
+   the image.
+.PARAMETER SmoothingMode
+   Sets the smoothing mode. Default is HighQuality.
+.PARAMETER InterpolationMode
+   Sets the interpolation mode. Default is HighQualityBicubic.
+.PARAMETER PixelOffsetMode
+   Sets the pixel offset mode. Default is HighQuality.
+.EXAMPLE
+   Resize-Image -Height 45 -Width 45 -ImagePath "Path/to/image.jpg"
+.EXAMPLE
+   Resize-Image -Height 45 -MaintainRatio -ImagePath "Path/to/image.jpg"
+.EXAMPLE
+   #Resize to 50% of the given image
+   Resize-Image -Percentage 50 -ImagePath "Path/to/image.jpg"
+.NOTES
+   Written By: 
+   Christopher Walker
+#>
+Function Resize-Image() {
+    [CmdLetBinding(
+        SupportsShouldProcess=$true, 
+        PositionalBinding=$false,
+        ConfirmImpact="Medium",
+        DefaultParameterSetName="Absolute"
+    )]
+    Param (
+        [Parameter(Mandatory=$True)]
+        [ValidateScript({
+            $_ | ForEach-Object {
+                Test-Path $_
+            }
+        })][String[]]$ImagePath,
+        [Parameter(Mandatory=$False)][Switch]$MaintainRatio,
+        [Parameter(Mandatory=$False, ParameterSetName="Absolute")][Int]$Height,
+        [Parameter(Mandatory=$False, ParameterSetName="Absolute")][Int]$Width,
+        [Parameter(Mandatory=$False, ParameterSetName="Percent")][Double]$Percentage,
+        [Parameter(Mandatory=$False)][System.Drawing.Drawing2D.SmoothingMode]$SmoothingMode = "HighQuality",
+        [Parameter(Mandatory=$False)][System.Drawing.Drawing2D.InterpolationMode]$InterpolationMode = "HighQualityBicubic",
+        [Parameter(Mandatory=$False)][System.Drawing.Drawing2D.PixelOffsetMode]$PixelOffsetMode = "HighQuality",
+        [Parameter(Mandatory=$False)][String]$NameModifier = "resized"
+    )
+    Begin {
+        If ($Width -and $Height -and $MaintainRatio) {
+            Throw "Absolute Width and Height cannot be given with the MaintainRatio parameter."
+        }
+ 
+        If (($Width -xor $Height) -and (-not $MaintainRatio)) {
+            Throw "MaintainRatio must be set with incomplete size parameters (Missing height or width without MaintainRatio)"
+        }
+ 
+        If ($Percentage -and $MaintainRatio) {
+            Write-Warning "The MaintainRatio flag while using the Percentage parameter does nothing"
+        }
+    }
+    Process {
+        ForEach ($Image in $ImagePath) {
+            $Path = (Resolve-Path $Image).Path
+            $Dot = $Path.LastIndexOf(".")
+
+            #Add name modifier (OriginalName_{$NameModifier}.jpg)
+            $OutputPath = $Path.Substring(0,$Dot) + "_" + $NameModifier + $Path.Substring($Dot,$Path.Length - $Dot)
+            
+            $OldImage = New-Object -TypeName System.Drawing.Bitmap -ArgumentList $Path
+            # Grab these for use in calculations below. 
+            $OldHeight = $OldImage.Height
+            $OldWidth = $OldImage.Width
+ 
+            If ($MaintainRatio) {
+                $OldHeight = $OldImage.Height
+                $OldWidth = $OldImage.Width
+                If ($Height) {
+                    $Width = $OldWidth / $OldHeight * $Height
+                }
+                If ($Width) {
+                    $Height = $OldHeight / $OldWidth * $Width
+                }
+            }
+ 
+            If ($Percentage) {
+                $Product = ($Percentage / 100)
+                $Height = $OldHeight * $Product
+                $Width = $OldWidth * $Product
+            }
+
+            $Bitmap = New-Object -TypeName System.Drawing.Bitmap -ArgumentList $Width, $Height
+            $NewImage = [System.Drawing.Graphics]::FromImage($Bitmap)
+             
+            #Retrieving the best quality possible
+            $NewImage.SmoothingMode = $SmoothingMode
+            $NewImage.InterpolationMode = $InterpolationMode
+            $NewImage.PixelOffsetMode = $PixelOffsetMode
+            $NewImage.DrawImage($OldImage, $(New-Object -TypeName System.Drawing.Rectangle -ArgumentList 0, 0, $Width, $Height))
+
+            If ($PSCmdlet.ShouldProcess("Resized image based on $Path", "save to $OutputPath")) {
+                $Bitmap.Save($OutputPath)
+            }
+            
+            $Bitmap.Dispose()
+            $NewImage.Dispose()
+            $OldImage.Dispose()
+        }
+    }
+}
+## End resize-image function
 
 ## End functions
 
@@ -316,7 +489,7 @@ $iwrsplat = @{
     Useragent = $useragent
 }
 
-$iwr = Invoke-WebRequest -uri $oauthsubreddit/new?limit=5 @iwrsplat
+$iwr = Invoke-WebRequest -uri "$oauthsubreddit/new?limit=5" @iwrsplat
 $posts = $iwr.Content | ConvertFrom-Json
 
 # Check rate limit status
@@ -326,173 +499,32 @@ if ($iwr.Headers.'x-ratelimit-remaining'.split('.')[0] -lt 10) { start-sleep -Se
 
 # Extract interesting bits
 $posts = $posts.data.children.data
+
+if ($posts.count -eq 0){ 
+    Write-host (get-date) "No new posts, aborting"
+
+    break 
+}
 
 # Log downloaded posts
 write-host (get-date) 'Downloaded' $posts.Count 'posts, checking for unknown posts'
 
 # Filter out users not in repost-checklist
-## End functions
-
-# Start main script
-
-# Splat the frequently used vars to shorten commands
-$iwrsplat = @{
-    Headers = $headers
-    Useragent = $useragent
-}
-
-$iwr = Invoke-WebRequest -uri $oauthsubreddit/new?limit=5 @iwrsplat
-$posts = $iwr.Content | ConvertFrom-Json
-
-# Check rate limit status
-Write-Host (get-date) "Remaining rate limit: $($iwr.Headers.'x-ratelimit-remaining')"
-if ($iwr.Headers.'x-ratelimit-remaining'.split('.')[0] -lt 10) { start-sleep -Seconds [int]$iwr.Headers.'x-ratelimit-reset'[0]}
-
-
-# Extract interesting bits
-$posts = $posts.data.children.data
-
-# Log downloaded posts
-write-host (get-date) 'Downloaded' $posts.Count 'posts, checking for unknown posts'
-
-# Loop through posts and download images/videos
-foreach ($post in $posts){
-    if ($post.name -notin (Get-Content $storage\hashedposts.txt)){
-        # New post double beep
-        [console]::beep(500,300);[console]::beep(500,300)
-         
-        $filetypes = '.jpg', '.bmp', '.png', '.gif', 'jpeg', 'webp'
-
-        # Download source image (assuming non-gallery type post)
-        if ($post.url.Substring($post.url.length-4) -in $filetypes){
-
-            # Log output unknown post
-            Write-host (get-date) 'Found a new post, downloading image'
-            
-            # Download image to generic filename
-            try{
-                Invoke-WebRequest -Uri $post.url -OutFile $storage\filehash.jpg -ErrorVariable downloaderror -ErrorAction SilentlyContinue
-            }
-            catch{Write-Host (get-date 'Error downloading post, dumping json for debug' $post) }
-
-            # Check for download-errors
-            if ($downloaderror) { write-host (get-date) 'Could not download image' $post.url
-            }
-            Remove-Variable downloaderror -ErrorAction SilentlyContinue
-
-            # Hash the image
-            $hash = invoke-filehash
-
-            # Check the hash against known list of hashes
-            invoke-hashmatch $hash
-            
-            # Remove temporary files
-            remove-item $storage\filehash.jpg -Force
-            remove-item $storage\filehash_resized.jpg -Force
-
-            # Clear the hash variable to prevent contamination
-            clear-variable hash
-        } # End if image of .jpg/png/gif
-
-        # For gallery type posts (only first image)
-        elseif ($post.url -match 'gallery') {
-            write-host (get-date) 'Found new gallery post, downloading images'
-            
-            # Get gallery details
-            $gallery = $post.gallery_data.items.media_id
-            
-            # Get gallery images
-            foreach ($image in $gallery){
-                if (($post.media_metadata | out-string) -match 'm=image/gif'){$extension = '.gif'}
-                if (($post.media_metadata | out-string) -match 'm=image/png'){$extension = '.png'}
-                if (($post.media_metadata | out-string) -match 'm=image/jpg'){$extension = '.jpg'}
-                Invoke-WebRequest -uri "https://i.redd.it/$image$extension" -OutFile $storage\filehash.jpg -ErrorVariable downloaderror -ErrorAction SilentlyContinue
-                
-                # Check for download errors
-                if ($downloaderror) { write-host (get-date) 'Could not download image' $post.url}
-                Remove-Variable downloaderror -ErrorAction SilentlyContinue
-
-                # Get hash for the downloaded image
-                $hash = invoke-filehash
-
-                # Check hash against known hashes
-                invoke-hashmatch $hash
-
-                # Clear the hash variable to prevent contamination
-                Clear-Variable hash
-            } # End foreach image in gallery
-        } # End if gallery type
-
-        ## Video posts
-        if ($post.is_video -eq 'true'){
-
-            $iwrparams = @{
-                Headers = @{Authorization = 'Bearer ' + $bearer}
-                Useragent = $useragent
-                Outfile =  "$storage\filehash.vid"
-                ErrorVariable = 'downloaderror'
-                ErrorAction = 'SilentlyContinue'
-            }
-            
-            # Use youtube DL to download video because dash issues
-            $json = C:\Youtube-dl\youtube-dl.exe -F $post.media.reddit_video.scrubber_media_url --write-info-json
-            $streamtype = (($json | Where-Object {$_ -match 'hls' -and $_ -notmatch 'audio'})[0] -split(" "))[0]
-            c:\youtube-dl\youtube-dl.exe -f $streamtype $post.media.reddit_video.scrubber_media_url -o $storage\filehash.vid -q
-            
-            #check download
-            if (Test-Path $storage\filehash.vid){
-                Write-host (get-date) "Succesfully downloaded video from $($post.url)"
-            }
-                
-            
-            # Check for download errors
-            if ($downloaderror) { write-host (get-date) 'Could not download file' $post.url}
-            Remove-Variable downloaderror -ErrorAction SilentlyContinue
-
-            # Get hash for the downloaded image
-            $hash = get-filehash $iwrparams.Outfile
-            
-            # Add post url and date to hash-variable for proof later on
-            $hash | Add-Member -MemberType NoteProperty  -Name post-date -Value (Get-Date)
-            $hash | Add-Member -MemberType NoteProperty  -Name post-created -Value $post.created
-            $hash | Add-Member -MemberType NoteProperty  -Name Post-ID -Value ($post.name -replace('t3_','https://www.reddit.com/comments/'))
-            $hash | Add-Member -MemberType NoteProperty -Name Author -Value ($post.author)
-
-            # Check hash against known hashes
-            invoke-hashmatch $hash
-
-            # Remove video file
-            remove-item $storage\filehash.vid
-
-            # Clear the hash variable to prevent contamination
-            Clear-Variable hash
-        } # End if video post
-
-        # Add posts to hashed posts
-        $post.name | Out-File $storage\hashedposts.txt -Append
-        Write-host (get-date) 'Post' $post.name 'added to known posts'
-    } # Einde If post notin known posts
-}
-
-
-# Log output finished
-Write-host (get-date) 'All done, exiting'
-
-# Clean up log
-$time = (Get-date) | Select-Object hour, minute
-if ($time.hour -eq 12 -and $time.minute -eq 20) { 
-    Write-host (get-date) 'Cleaning up logfile'
-    $logcontent = Get-Content $storage\crossdressing-hashes.log -last 10000
-    $logcontent | Set-Content $storage\crossdressing-hashes.log }
-Write-host (get-date) (Stop-transcript)
-
-
+#$posts = $posts | where {$_.author -in $users}
 
 # Loop through posts and download images
 foreach ($post in $posts){
-    if ($post.name -notin (Get-Content $storage\hashedposts.txt)){
+    # Output for queue
+    if (!(test-path "$storage\queue\$($post.id).json")){ $post | ConvertTo-Json -Depth 10 | Out-File $storage\queue\$($post.id).json}
+
+    # Remove previous image if it still exists
+    if (test-path $storage\filehash.jpg){remove-item $storage\filehash.jpg -Force -Verbose}
+    if (test-path $storage\filehash_resized.jpg){remove-item $storage\filehash_resized.jpg -Force -Verbose}
+
+    if ($post.name -notin (Get-Content $storage\hashedposts.txt -Tail 105 )){
         # New post double beep
-        [console]::beep(500,300);[console]::beep(500,300)
+        Write-host (get-date) 'Post NSFW status:' $post.over_18
+        if($post.over_18 -match 'True'){[console]::beep(500,300);[console]::beep(500,300)}
          
         $filetypes = '.jpg', '.bmp', '.png', '.gif', 'jpeg', 'webp'
 
@@ -500,7 +532,7 @@ foreach ($post in $posts){
         if ($post.url.Substring($post.url.length-4) -in $filetypes){
 
             # Log output unknown post
-            Write-host (get-date) 'Found a new post, downloading image'
+            Write-host (get-date) "Found a new post by $($post.author), downloading image"
             
             # Download image to generic filename
             try{
@@ -520,8 +552,8 @@ foreach ($post in $posts){
             invoke-hashmatch $hash
             
             # Remove temporary files
-            remove-item $storage\filehash.jpg -Force
-            remove-item $storage\filehash_resized.jpg -Force
+            while (Test-Path $storage\filehash.jpg){   remove-item $storage\filehash.jpg -Force -Verbose }
+            while (Test-Path $storage\filehash_resized.jpg){   remove-item $storage\filehash_resized.jpg -Force -Verbose }
 
             # Clear the hash variable to prevent contamination
             clear-variable hash
@@ -529,13 +561,21 @@ foreach ($post in $posts){
 
         # For gallery type posts (only first image)
         elseif ($post.url -match 'gallery') {
-            write-host (get-date) 'Found new gallery post, downloading images'
+            write-host (get-date) "Found new gallery post by $($post.author), downloading images"
             
             # Get gallery details
             $gallery = $post.gallery_data.items.media_id
             
             # Get gallery images
             foreach ($image in $gallery){
+                # Remove file if exists (loop until completed)
+                while (test-path $storage\filehash.jpg){
+                    remove-item $storage\filehash.jpg -Force -Verbose
+                }
+                while (test-path $storage\filehash_resized.jpg){
+                    remove-item $storage\filehash_resized.jpg -Force
+                }
+            
                 if (($post.media_metadata | out-string) -match 'm=image/gif'){$extension = '.gif'}
                 if (($post.media_metadata | out-string) -match 'm=image/png'){$extension = '.png'}
                 if (($post.media_metadata | out-string) -match 'm=image/jpg'){$extension = '.jpg'}
@@ -558,6 +598,8 @@ foreach ($post in $posts){
 
         ## Video posts
         if ($post.is_video -eq 'true'){
+            # Output
+            Write-Host (get-date) "Found a new video post by $($post.author), downloading video"
 
             $iwrparams = @{
                 Headers = @{Authorization = 'Bearer ' + $bearer}
@@ -595,7 +637,7 @@ foreach ($post in $posts){
             invoke-hashmatch $hash
 
             # Remove video file
-            remove-item $storage\filehash.vid
+            while (Test-Path $storage\filehash.vid) {remove-item $storage\filehash.vid -force -verbose}
 
             # Clear the hash variable to prevent contamination
             Clear-Variable hash
@@ -610,12 +652,19 @@ foreach ($post in $posts){
 
 # Log output finished
 Write-host (get-date) 'All done, exiting'
+Write-host (get-date) (Stop-transcript)
 
 # Clean up log
 $time = (Get-date) | Select-Object hour, minute
 if ($time.hour -eq 12 -and $time.minute -eq 20) { 
     Write-host (get-date) 'Cleaning up logfile'
     $logcontent = Get-Content $storage\crossdressing-hashes.log -last 10000
+    remove-item $storage\crossdressing-hashes.log -Force
     $logcontent | Set-Content $storage\crossdressing-hashes.log }
-Write-host (get-date) (Stop-transcript)
 
+
+# Create a backup copy of the file hashes at midnight
+if ((get-date -format "HHmm") -eq 0600){
+    $date = Get-Date -Format('yyyyMMdd')
+    Copy-Item $storage\filehashs.csv -Destination "$storage\$date - filehash.csv"
+}
