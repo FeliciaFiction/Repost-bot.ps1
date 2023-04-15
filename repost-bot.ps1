@@ -1,4 +1,6 @@
 <###
+Version: 0.2.1: 
+    Optimizing the search through knownhashes, went from 3.2 seconds per check to 60 milliseconds.
 Version: 0.2.0:
     Added option for finding posts since last run
 Version: 0.1.8
@@ -234,22 +236,19 @@ Function invoke-filehash {
 
 } # End of invoke-filehash
 
-# Invoke-hashmatch
 Function Invoke-hashmatch{
     param (
         [Parameter (Mandatory = $True)] $hash
     )
-            
+           
     # Read all known hashes
-    $knownhashes = Import-Csv $storage\filehashs.csv  | Sort-Object @{expression={$_.'Post-date' -as [datetime]}}
-
-    # Check has existance and return line-number (or -1 if not)
-    $regelnummer = [array]::indexof($knownhashes.hash,$hash.hash)
+    $results = Select-String $hash.hash $storage\filehashs.csv | Select-Object Line -First 1
+    if ($results){
+        $knownhash = $results.line | convertfrom-csv -Header ((Get-Content $storage\filehashs.csv | Select-Object -First 1).Split(',') -replace("`"",""))
+    }
 
     # If linenumber not -1, execute repost report
-    if ($regelnummer -ne -1){ 
-        $knownhash = $knownhashes[$regelnummer]
-
+    if ([bool]$knownhash){ 
         # Postid maken zoals reddit verwacht
         $postid = 't3_' + $hash.'Post-ID' -replace('https://www.reddit.com/comments/','')
 
@@ -258,7 +257,6 @@ Function Invoke-hashmatch{
 
         if ($post.created -lt $created + 600 -and $created -ne 0){
             # Probabble duplicate post
-            $reportreason = "Repost within 10min, probably duplicate: " + $knownhash.'post-date'+' ' + $knownhash.'Post-ID'
             write-host (get-date) 'Found a probable duplicate repost:' $hash.'Post-ID' 'and previous post:' $knownhash.'Post-ID'
 
             #invoke-redditreport -postid $postid -Reportreason $reportreason
@@ -281,10 +279,6 @@ Function Invoke-hashmatch{
 
             # Extract the post details
             $previouspost = $previouspost.data.children.data[0]
-
-            # Save for debugging purposes
-            $previouspost | ConvertTo-Json -Depth 100 | Out-File $storage\$($previouspost.name).json -Verbose
-            #$previouspost | import-csv $storage\$($previouspost.name).csv
 
             if ($previouspost.removed -eq 'True' -and $previouspost.removed_by_category -eq 'moderator'){
                 Write-host (get-date) "Previous post removed by mod: $($knownhash.'Post-id')"
@@ -319,22 +313,16 @@ Function Invoke-hashmatch{
 
             # Report the post as a repost
             invoke-redditreport -postid $postid -Reportreason $reportreason
-            Write-host (get-date) "Invoked reddit report with parameters:  $postid and reason: `"$reportreason`""
-        
+       
         }
 
-        # Update the csv file presenting known reposts
-        import-csv E:\temp\crossdressing\filehashs.csv | Group-Object hash | `
-            where-object {$_.count -gt 1} | select-object -ExpandProperty Group | `
-            Group-Object author | select-object -ExpandProperty Group | `
-            Select-Object Author, Post-Date, Post-id, Hash | `
-            Export-Csv 'G:\Mijn Drive\_Temp\crossdressing\reposters.csv' -NoTypeInformation
         } # Einde if regelnummer niet -1
 
     # Add hash to known hashes
     $hash | Export-Csv $storage\filehashs.csv -Append
 
 } # End invoke-hashmatch
+
 
 Function Invoke-Redditreport {
     param(
