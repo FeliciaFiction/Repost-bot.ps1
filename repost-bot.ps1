@@ -33,7 +33,6 @@ param([string]$subname)
 # Global variables:
 $username = ""                                                      # Your Reddit username
 $useragent = "$username's Repost-hasher 0.2.0"                      # Useragent, update version
-$subname = "crossdressing"                                          # General subname based on folder name
 $apiurl = "https://oauth.reddit.com"                                # API url 
 $storage =  "E:\Temp\$subname\"                                        # Storage per subreddit
 $oauthsubreddit = "https://oauth.reddit.com/r/$subname"             # Oauth URL for subreddit specific operations
